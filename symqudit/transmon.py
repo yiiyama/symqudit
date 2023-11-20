@@ -1,4 +1,5 @@
 from collections import defaultdict
+import numpy as np
 from sympy import I, S, symbols, poly, factorial, factorial2
 from sympy.core.numbers import Rational
 from sympy.physics.quantum.dagger import Dagger
@@ -13,14 +14,15 @@ def RaisingOp__print_contents_latex(self, printer, *args):
     return '{%s^{\\dagger}}' % arg
 RaisingOp._print_contents_latex = RaisingOp__print_contents_latex
 
+
 class Transmon:
     def __init__(self, name, harmonic_freq, anharm_measure):
         self._name = name
         self._harmonic_freq = harmonic_freq
         self._anharm_measure = anharm_measure
 
-        self._omegah = symbols(f'ω_{self._name}')
-        self._epsilon = symbols(f'ε_{self._name}')
+        self._omegah = symbols(f'omega_{self._name}', real=True)
+        self._epsilon = symbols(f'epsilon_{self._name}', real=True)
         self._b = LoweringOp(f'b_{self._name}')
         self._bdag = RaisingOp(f'b_{self._name}')
 
@@ -42,8 +44,8 @@ class Transmon:
 
     @property
     def exact_hamiltonian(self):
-        return self._omegah / 4. * (self.charge_op * self.charge_op - 2. / self._epsilon
-                                    * cos(sqrt(self._epsilon) * self.phase_op))
+        return self._omegah * Rational(1, 4) * (self.charge_op ** 2 - 2 / self._epsilon
+                                                * cos(sqrt(self._epsilon) * self.phase_op))
 
     def hamiltonian(self, pert_order, normal_order=True):
         return self._omegah * sum(((self._epsilon ** order)
@@ -84,15 +86,8 @@ class Transmon:
                 norm += c * (self._epsilon ** (2 * iexp)) * (norm_term ** iexp)
 
             for im, coeff in self._eigenstate_coeffs(level, order).items():
-                poly_coeff = poly(coeff * norm, self._epsilon)
-                # truncate to pert_order
-                corr_coeff = S.Zero
-                for (power,), c in poly_coeff.terms():
-                    if power + order > pert_order:
-                        continue
-                    corr_coeff += (self._epsilon ** (power + order)) * c
-
-                state += corr_coeff * SHOKet(im)
+                state += (self._truncate_perturbation(coeff * norm, pert_order, leading=order)
+                          * SHOKet(im))
 
         self._eigenstates[level][pert_order] = state
         return state
@@ -185,3 +180,26 @@ class Transmon:
         coeffs = self._eigenstate_coeffs(level, order)
         return sum((coeff * SHOKet(level) for level, coeff in coeffs.items()),
                    S.Zero)
+
+    def phase_matrix_element(self, row, col, pert_order):
+        return self._matrix_element(self.phase_op, row, col, pert_order)
+
+    def charge_matrix_element(self, row, col, pert_order):
+        return self._matrix_element(self.charge_op, row, col, pert_order)
+
+    def _matrix_element(self, op, row, col, pert_order):
+        row_state = self.eigenstate(row, pert_order)
+        col_state = self.eigenstate(col, pert_order)
+        me = qapply(Dagger(row_state) * qapply(op * col_state))
+        return self._truncate_perturbation(me, pert_order)
+
+    def _truncate_perturbation(self, expr, max_order, leading=0):
+        polynomial = poly(expr, self._epsilon)
+        # truncate to pert_order
+        trunc_expr = S.Zero
+        for (power,), c in polynomial.terms():
+            if power + leading > max_order:
+                continue
+            trunc_expr += (self._epsilon ** (power + leading)) * c
+
+        return trunc_expr
