@@ -1,12 +1,11 @@
 from collections import defaultdict
 import numpy as np
-from sympy import I, S, symbols, poly, factorial, factorial2
-from sympy.core.numbers import Rational
-from sympy.physics.quantum.dagger import Dagger
-from sympy.physics.quantum.qapply import qapply
-from sympy.functions.elementary.miscellaneous import sqrt
-from sympy.functions.elementary.trigonometric import cos
+from sympy import (Function, I, Integer, Rational, S, Sum, cos, exp, factorial, factorial2, sqrt,
+                   symbols)
+from sympy.physics.quantum import Dagger, qapply
 from sympy.physics.quantum.sho1d import LoweringOp, RaisingOp, SHOBra, SHOKet
+
+from .common import ketbra, truncate_at_order
 
 
 def RaisingOp__print_contents_latex(self, printer, *args):
@@ -17,19 +16,22 @@ RaisingOp._print_contents_latex = RaisingOp__print_contents_latex
 
 class Transmon:
     def __init__(self, name, harmonic_freq, anharm_measure):
-        self._name = name
+        self.name = name
         self._harmonic_freq = harmonic_freq
         self._anharm_measure = anharm_measure
 
-        self._omegah = symbols(f'omega_{self._name}', real=True)
-        self._epsilon = symbols(f'epsilon_{self._name}', real=True)
-        self._b = LoweringOp(f'b_{self._name}')
-        self._bdag = RaisingOp(f'b_{self._name}')
+        self._omegah = symbols(f'omega_{name}', real=True, positive=True)
+        self._epsilon = symbols(f'epsilon_{name}', real=True, positive=True)
+        self._b = LoweringOp(f'b_{name}')
+        self._bdag = RaisingOp(f'b_{name}')
 
         self._hamiltonian = {0: self._bdag * self._b}
         self._coeffs = defaultdict(dict)
         self._eigenvalue_terms = defaultdict(dict)
         self._eigenstates = defaultdict(dict)
+
+        self._energygap = _EnergyGap.with_label(name)
+        self._transition_amp = _TransitionAmp.with_label(name)
 
     def evaluate(self, expr):
         return expr.subs({self._omegah: self._harmonic_freq, self._epsilon: self._anharm_measure})
@@ -42,12 +44,54 @@ class Transmon:
     def charge_op(self):
         return -I * (self._b - self._bdag)
 
+    def charge_proj(self, cutoff=S.Infinity):
+        if cutoff is S.Infinity:
+            j, k = symbols('j,k', integer=True, nonnegative=True)
+            shift_ind = j + 2 * k + 1
+            return -I * Sum(Sum(self._transition_amp(j, shift_ind)
+                                * (self._ketbra(j, shift_ind) - self._ketbra(shift_ind, j)),
+                                (k, 0, S.Infinity)),
+                            (j, 0, S.Infinity))
+        else:
+            return -I * sum((sum((self._transition_amp(j, j + k2 + 1)
+                                 * (self._ketbra(j, j + k2 + 1) - self._ketbra(j + k2 + 1, j))
+                                 for k2 in range(0, cutoff - j, 2)),
+                                 S.Zero)
+                            for j in range(cutoff)),
+                            S.Zero)
+
     @property
-    def exact_hamiltonian(self):
+    def hamiltonian_op(self):
         return self._omegah * Rational(1, 4) * (self.charge_op ** 2 - 2 / self._epsilon
                                                 * cos(sqrt(self._epsilon) * self.phase_op))
 
-    def hamiltonian(self, pert_order, normal_order=True):
+    def hamiltonian_diag(self, cutoff=S.Infinity):
+        """Exact Hamiltonian expressed in terms of eigenstate projectors."""
+        if cutoff is S.Infinity:
+            n = symbols('n', integer=True, nonnegative=True)
+            return Sum(self.symbolic_eigenvalue(n) * self._ketbra(n, n), (n, 1, cutoff))
+        else:
+            return sum((self.symbolic_eigenvalue(n) * self._ketbra(n, n) for n in range(1, cutoff + 1)),
+                       S.Zero)
+
+    def evolution_diag(self, cutoff=S.Infinity):
+        t = symbols('t', real=True)
+        if cutoff is S.Infinity:
+            n = symbols('n', integer=True, nonnegative=True)
+            return Sum(exp(-I * self.symbolic_eigenvalue(n) * t) * self._ketbra(n, n), (n, 0, cutoff))
+        else:
+            return sum((exp(-I * self.symbolic_eigenvalue(n) * t) * self._ketbra(n, n)
+                        for n in range(cutoff + 1)),
+                       S.Zero)
+
+    def symbolic_eigenvalue(self, level):
+        if level == S.Zero:
+            return S.Zero
+
+        k = symbols('k', integer=True, positive=True)
+        return self._omegah * Sum(self._energygap(k), (k, S.One, level))
+
+    def hamiltonian_ladder(self, pert_order, normal_order=True):
         return self._omegah * sum(((self._epsilon ** order)
                                    * self.hamiltonian_term(order, normal_order=normal_order)
                                    for order in range(pert_order + 1)),
@@ -57,6 +101,9 @@ class Transmon:
         return self._omegah * sum(((self._epsilon ** order) * self.eigenvalue_term(level, order)
                                    for order in range(pert_order + 1)),
                                   S.Zero)
+
+    def delta(self, level, pert_order):
+        return (self.eigenvalue(level, pert_order) - self.eigenvalue(level - 1, pert_order)).expand()
 
     def eigenstate(self, level, pert_order):
         if (state := self._eigenstates[level].get(pert_order)) is not None:
@@ -85,8 +132,9 @@ class Transmon:
                 c = factorial2(2 * iexp - 1) / factorial(iexp) / ((-2) ** iexp)
                 norm += c * (self._epsilon ** (2 * iexp)) * (norm_term ** iexp)
 
+            epsilon_pow = self._epsilon ** order
             for im, coeff in self._eigenstate_coeffs(level, order).items():
-                state += (self._truncate_perturbation(coeff * norm, pert_order, leading=order)
+                state += (truncate_at_order(epsilon_pow * coeff * norm, self._epsilon, pert_order)
                           * SHOKet(im))
 
         self._eigenstates[level][pert_order] = state
@@ -191,15 +239,74 @@ class Transmon:
         row_state = self.eigenstate(row, pert_order)
         col_state = self.eigenstate(col, pert_order)
         me = qapply(Dagger(row_state) * qapply(op * col_state))
-        return self._truncate_perturbation(me, pert_order)
+        return truncate_at_order(me, self._epsilon, pert_order)
 
-    def _truncate_perturbation(self, expr, max_order, leading=0):
-        polynomial = poly(expr, self._epsilon)
-        # truncate to pert_order
-        trunc_expr = S.Zero
-        for (power,), c in polynomial.terms():
-            if power + leading > max_order:
-                continue
-            trunc_expr += (self._epsilon ** (power + leading)) * c
+    def _ketbra(self, lket, lbra):
+        return ketbra((lket, self.name), (lbra, self.name))
 
-        return trunc_expr
+
+class _EnergyGap(Function):
+    is_real = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(cls, n):
+        if n.is_integer is False or n.is_positive is False:
+            raise TypeError('EnergyGap is only defined for positive integers')
+
+    def doit(self, deep=False, **hints):
+        n = self.args[0]
+        if deep:
+            n = n.doit(deep=deep, **hints)
+
+        return type(self)(n)
+
+#         if len(n.free_symbols) == 0:
+#             return symbols(fr'{{\gamma^{self.LABEL}}}_{{{n}}}', real=True, nonnegative=True)
+#         else:
+#             return type(self)(n)
+
+    def _latex(self, printer):
+        return fr'{{\gamma^{self.LABEL}}}_{{{self.args[0]}}}'
+
+    @staticmethod
+    def with_label(label):
+        class EnergyGap(_EnergyGap):
+            LABEL = label
+
+        return EnergyGap
+
+
+class _TransitionAmp(Function):
+    is_real = True
+
+    @classmethod
+    def eval(cls, m, n):
+        if (m.is_integer is False or m.is_nonnegative is False
+            or n.is_integer is False or n.is_nonnegative is False):
+            raise TypeError('TransitionAmp is only defined for positive integers')
+
+    def doit(self, deep=False, **hints):
+        m, n = self.args
+        if deep:
+            m = m.doit(deep=deep, **hints)
+            n = n.doit(deep=deep, **hints)
+
+        return type(self)(m, n)
+
+#         if len(m.free_symbols) + len(n.free_symbols) == 0:
+#             return symbols(fr'{{\nu^{self.LABEL}}}_{{{m}{n}}}', real=True)
+#         else:
+#             return type(self)(m, n)
+
+    def _latex(self, printer, exp=None):
+        if exp is not None:
+            return fr'{{\nu^{self.LABEL}}}_{{{self.args[0]},{self.args[1]}}}^{{{exp}}}'
+        return fr'{{\nu^{self.LABEL}}}_{{{self.args[0]},{self.args[1]}}}'
+
+    @staticmethod
+    def with_label(label):
+        class TransitionAmp(_TransitionAmp):
+            LABEL = label
+
+        return TransitionAmp
