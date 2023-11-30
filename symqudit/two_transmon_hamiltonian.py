@@ -200,44 +200,30 @@ class TwoTransmonHamiltonian:
         return components
 
 
+def is_static_block_diagonal(term):
+    c, nc = term.args_cnc()
+    c_op, t_op = nc[0].args
+    return c_op.ket.args[0] == c_op.bra.args[0] and diff(expr, time) is S.Zero
+
+
 def sort_block_diagonal(expr):
     b_terms = []
     n_terms = []
-    time = symbols('t', real=True)
 
     for term in expr.expand(tensorproduct=True).doit().args:
-        c, nc = term.args_cnc()
-        c_op, t_op = nc[0].args
-        if c_op.ket.args[0] == c_op.bra.args[0]:
-            exponents = [factor.args[0] for factor in c
-                         if isinstance(factor, exp) and time in factor.free_symbols]
-            if Add(*exponents).expand().doit() is S.Zero:
-                b_terms.append(term)
-                continue
+        if is_static_block_diagonal(term):
+            b_terms.append(term)
         else:
             n_terms.append(term)
 
     return Add(*b_terms), Add(*n_terms)
 
 
-def organize(expr):
-    terms = defaultdict(lambda: defaultdict(lambda: S.Zero))
-    for term in expr.expand(power_exp=False, tensorproduct=True, commutator=True).doit().args:
-        c, nc = term.args_cnc()
-        tprod = nc[0]
-        terms[tprod.args[0]][tprod.args[1]] += Mul(*c)
+def ket_repr(outerproduct):
+    return (int(outerproduct.args[0].args[0]), outerproduct.args[0].args[1].name)
 
-    full_result = []
-    for cop, t_terms in terms.items():
-        c_result = []
-        for top, factor in t_terms.items():
-            #c_result.append(simplify(factor) * top)
-            c_result.append(factor * top)
-
-        full_result.append(TensorProduct(cop, Add(*c_result)))
-
-    return Add(*full_result)
-
+def bra_repr(outerproduct):
+    return (int(outerproduct.args[1].args[0]), outerproduct.args[1].args[1].name)
 
 def to_dict(add_expr):
     """Convert an Add expression with terms of form C*(OuterProduct)x(OuterProduct or Id) to a dict."""
@@ -245,13 +231,14 @@ def to_dict(add_expr):
     for term in add_expr.args:
         c, nc = term.args_cnc()
         c_op, t_op = nc[0].args
-        c_ket, c_bra = tuple(arg.args for arg in c_op.args)
+        c_ket = ket_repr(c_op)
+        c_bra = bra_repr(c_op)
         if isinstance(t_op, IdentityOperator):
             ket = (c_ket, None)
             bra = (c_bra, None)
         else:
-            ket = (c_ket, t_op.args[0].args)
-            bra = (c_bra, t_op.args[1].args)
+            ket = (c_ket, ket_repr(t_op))
+            bra = (c_bra, bra_repr(t_op))
 
         terms[ket][bra] += Mul(*c)
 
@@ -270,34 +257,47 @@ def from_dict(terms):
     return Add(*result)
 
 
-def dict_product(lhs, rhs):
+def dict_product(lhs, rhs, blkdiag_only=False, expand=True):
     """Operator product of dicts returned by to_dict."""
     rhs_ct = defaultdict(dict)
     for (c_ket, t_ket), bra_dict in rhs.items():
         rhs_ct[c_ket][t_ket] = bra_dict
 
-    out = defaultdict(lambda: defaultdict(lambda: S.Zero))
+    out_tmp = defaultdict(lambda: defaultdict(list))
+    # Loop over LHS {(cket, tket): {(cbra, tbra): coeff}}
     for lhs_ket, lhs_bra_dict in lhs.items():
+        # {(cbra, tbra): coeff}
         for (c_bra, t_bra), lhs_coeff in lhs_bra_dict.items():
+            # Find a match in {cket: {tket: bra_dict}}
             if (rhs_t := rhs_ct.get(c_bra)) is None:
                 continue
+
             if lhs_ket[1] is None:
                 for t_ket, rhs_bra_dict in rhs_t.items():
                     for rhs_bra, rhs_coeff in rhs_bra_dict.items():
-                        out[(lhs_ket[0], t_ket)][(rhs_bra)] += lhs_coeff * rhs_coeff
+                        if blkdiag_only and rhs_bra[0] != lhs_ket[0]:
+                            continue
+                        out_tmp[(lhs_ket[0], t_ket)][(rhs_bra)].append(lhs_coeff * rhs_coeff)
             else:
                 if (rhs_bra_dict := rhs_t.get(t_bra)) is not None:
                     for rhs_bra, rhs_coeff in rhs_bra_dict.items():
-                        out[lhs_ket][rhs_bra] += lhs_coeff * rhs_coeff
+                        if blkdiag_only and rhs_bra[0] != lhs_ket[0]:
+                            continue
+                        out_tmp[lhs_ket][rhs_bra].append(lhs_coeff * rhs_coeff)
+
                 if (rhs_bra_dict := rhs_t.get(None)) is not None:
                     for rhs_bra, rhs_coeff in rhs_bra_dict.items():
-                        out[lhs_ket][(rhs_bra[0], t_bra)] += lhs_coeff * rhs_coeff
+                        if blkdiag_only and rhs_bra[0] != lhs_ket[0]:
+                            continue
+                        out_tmp[lhs_ket][(rhs_bra[0], t_bra)].append(lhs_coeff * rhs_coeff)
+
+    out = {}
+    for ket, bra_dict in out_tmp.items():
+        out[ket] = {}
+        for bra, terms in bra_dict.items():
+            coeff = Add(*terms)
+            if expand:
+                coeff = coeff.expand()
+            out[ket][bra] = coeff
 
     return out
-
-
-def pauli_components(hamiltonian_dict, cdim, tdim):
-    matrices = paulis((cdim, tdim))
-    for ic in range(cdim ** 2):
-        for it in range(tdim ** 2):
-            c_

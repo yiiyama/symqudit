@@ -1,5 +1,5 @@
 from collections import defaultdict
-from sympy import Add, I, KroneckerDelta, Mul, Order, Rational, S, sqrt, sympify
+from sympy import Add, I, KroneckerDelta, Mul, Number, Order, Pow, Rational, S, simplify, sqrt, sympify
 from sympy.physics.quantum import BraBase, InnerProduct, KetBase, OuterProduct, State, StateBase
 
 
@@ -143,3 +143,37 @@ def pauli_ops(dim, label=None):
         matrices.append(mat)
 
     return matrices
+
+
+def organize_by_denom(expr):
+    by_denom = defaultdict(lambda: S.Zero)
+
+    for term in expr.expand().args:
+        if isinstance(term, Mul):
+            numer = S.One
+            denom = S.One
+            for factor in term.args:
+                if isinstance(factor, Pow) and factor.args[1] < 0:
+                    denom /= factor
+                else:
+                    numer *= factor
+
+            denom = simplify(denom)
+            if isinstance(denom, Mul):
+                factors = denom.args
+            else:
+                factors = [denom]
+
+            symbolic = S.One
+            for factor in factors:
+                if isinstance(factor, Number):
+                    numer /= factor
+                else:
+                    symbolic *= factor
+
+            by_denom[symbolic] += numer
+
+        else:
+            by_denom[S.One] += term
+
+    return Add(*[numer / denom for denom, numer in by_denom.items()])

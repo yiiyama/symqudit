@@ -4,6 +4,8 @@ from sympy.physics.quantum import Commutator, HermitianOperator
 from .common import get_power, truncate_at_order
 
 
+time = symbols('t', real=True)
+
 class SWExpansion:
     def __init__(self):
         self.g_n = {}
@@ -65,20 +67,19 @@ class SWExpansion:
         return truncate_at_order(com_terms, param, max_order)
 
 
-def integrate_exps(dot_expr):
-    time = symbols('t', real=True)
-    expr_terms = []
-    for term in dot_expr.args:
-        omegas = []
-        factors = []
-        for factor in term.args:
-            if isinstance(factor, exp) and time in factor.free_symbols:
-                omegas.append(-I * diff(factor, time).subs({time: 0}))
-            else:
-                factors.append(factor)
+def integrate_exp_term(term):
+    omegas = []
+    factors = []
+    for factor in term.args:
+        if isinstance(factor, exp) and time in factor.free_symbols:
+            omegas.append(-I * diff(factor, time).subs({time: 0}))
+        else:
+            factors.append(factor)
 
-        omega = Add(*omegas)
-        coeff = Mul(*factors)
-        expr_terms.append(-I * (coeff * exp(I * omega * time) - coeff) / omega)
+    omega = Add(*omegas)
+    coeff = Mul(*factors)
+    return -I * (coeff * exp(I * omega * time) - coeff) / omega
 
-    return Add(*expr_terms)
+
+def integrate_expr(dot_expr):
+    return Add(*[integrate_exp_term(term) for term in dot_expr.args])
