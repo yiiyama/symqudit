@@ -1,12 +1,14 @@
 from collections import defaultdict
-from sympy import Add, I, Mul, Rational, S, Sum, conjugate, diff, exp, simplify, sin, symbols
+import re
+from sympy import (Add, Function, I, Mul, Rational, S, Sum, Symbol, conjugate, exp,
+                   preorder_traversal, simplify, sin, symbols)
 from sympy.physics.quantum import Dagger, IdentityOperator, TensorProduct, qapply
 
 from .transmon import Transmon
 from .common import ketbra, pauli_ops
 
 Id = IdentityOperator()
-time = symbols('t', real=True)
+time = Symbol('t', real=True)
 
 
 class TwoTransmonHamiltonian:
@@ -18,10 +20,10 @@ class TwoTransmonHamiltonian:
         self.qc = Transmon('c', harmonic_freqs[0], anharm_measures[0])
         self.qt = Transmon('t', harmonic_freqs[1], anharm_measures[1])
 
-        self.coupling = symbols('J', real=True, positive=True)
-        self.drive_amp = symbols('Omega', real=True, positive=True)
-        self.drive_freq = symbols('omega_d', real=True, positive=True)
-        self.drive_phase = symbols('phi_d', real=True)
+        self.coupling = Symbol('J', real=True, positive=True)
+        self.drive_amp = Symbol('Omega', real=True, positive=True)
+        self.drive_freq = Symbol('omega_d', real=True, positive=True)
+        self.drive_phase = Symbol('phi_d', real=True)
 
     @property
     def h_0_op(self):
@@ -143,7 +145,6 @@ class TwoTransmonHamiltonian:
 
     def subs_delta(self, expr):
         """Replace omega differences in h_dirac(rwa=True) with Delta expressions."""
-        time = symbols('t', real=True)
         result_terms = []
         for term in expr.expand(tensorproduct=True).doit().args:
             factors = []
@@ -153,14 +154,14 @@ class TwoTransmonHamiltonian:
                     exponent = factor.args[0]
                     if self.qc._omegah in free_symbols:
                         ind1 = next(elem for elem in exponent.args
-                                    if isinstance(elem, self.qc._energygap)).args[0]
+                                    if isinstance(elem, self.qc._energy_gap)).args[0]
                         if -1 in exponent.args:
                             sgn = -1
                         else:
                             sgn = 1
                     elif self.qt._omegah in free_symbols:
                         ind2 = next(elem for elem in exponent.args
-                                    if isinstance(elem, self.qt._energygap)).args[0]
+                                    if isinstance(elem, self.qt._energy_gap)).args[0]
                     elif self.drive_freq in free_symbols:
                         ind2 = 'd'
                     else:
@@ -169,10 +170,31 @@ class TwoTransmonHamiltonian:
 
                 factors.append(factor)
 
-            delta = symbols(fr'{{\Delta^{ind1}_{ind2}}}', real=True)
+            delta = FrequencyDiff(ind1, ind2)
             result_terms.append(Mul(exp(sgn * I * delta * time), *factors))
 
         return Add(*result_terms)
+
+    def symbolify(self, expr):
+        expr = self.qt.symbolify(self.qc.symbolify(expr))
+        subs = {}
+        for arg in preorder_traversal(expr):
+            if isinstance(arg, FrequencyDiff):
+                subs[arg] = Symbol(fr'{{\Delta^{{{arg.args[0]}}}_{{{arg.args[1]}}}}}')
+        return expr.subs(subs)
+
+    def funcify(self, expr):
+        expr = self.qt.funcify(self.qc.funcify(expr))
+        subs = {}
+        for arg in preorder_traversal(expr):
+            if isinstance(arg, Symbol) and r'\Delta' in arg.name:
+                matches = re.search(r'Delta\^{([0-9]+)}_{([d0-9]+)}', arg.name)
+                if matches.group(2) == 'd':
+                    tind = 'd'
+                else:
+                    tind = int(matches.group(2))
+                subs[arg] = FrequencyDiff(int(matches.group(1)), tind)
+        return expr.subs(subs)
 
     def paulis(self, cdim, tdim):
         ops = {}
@@ -200,10 +222,33 @@ class TwoTransmonHamiltonian:
         return components
 
 
+class FrequencyDiff(Function):
+    is_real = True
+
+    @classmethod
+    def eval(cls, cind, tind):
+        if cind.is_integer is False:
+            raise TypeError('First argument of FrequencyDiff must be an integer')
+
+    def doit(self, deep=False, **hints):
+        c, t = self.args
+        if deep:
+            c = c.doit(deep=deep, **hints)
+            t = t.doit(deep=deep, **hints)
+
+        return type(self)(c, t)
+
+    def _latex(self, printer, exp=None):
+        s = fr'{{\Delta^{{{self.args[0]}}}_{{{self.args[1]}}}}}'
+        if exp is not None:
+            return s + f'^{{{exp}}}'
+        return s
+
+
 def is_static_block_diagonal(term):
     c, nc = term.args_cnc()
     c_op, t_op = nc[0].args
-    return c_op.ket.args[0] == c_op.bra.args[0] and diff(expr, time) is S.Zero
+    return c_op.ket.args[0] == c_op.bra.args[0] and time not in preorder_traversal(expr)
 
 
 def sort_block_diagonal(expr):

@@ -1,6 +1,6 @@
 from collections import defaultdict
 from sympy import Add, I, KroneckerDelta, Mul, Number, Order, Pow, Rational, S, simplify, sqrt, sympify
-from sympy.physics.quantum import BraBase, InnerProduct, KetBase, OuterProduct, State, StateBase
+from sympy.physics.quantum import BraBase, Dagger, InnerProduct, KetBase, OuterProduct, State, StateBase
 
 
 class DiscreteState(State, StateBase):
@@ -43,6 +43,23 @@ class DiscreteBra(DiscreteState, BraBase):
         return super().__mul__(other)
 
 class DiscreteOuterProduct(OuterProduct):
+    @property
+    def free_symbols(self):
+        ket_sym = set()
+        for arg in self.ket.args:
+            ket_sym |= arg.free_symbols
+        bra_sym = set()
+        for arg in self.bra.args:
+            bra_sym |= arg.free_symbols
+        if ket_sym and bra_sym:
+            return ket_sym | bra_sym
+        elif ket_sym and not bra_sym:
+            return ket_sym | set([self.bra])
+        elif not ket_sym and bra_sym:
+            return set([self.ket]) | bra_sym
+        else:
+            return super().free_symbols
+
     def __mul__(self, other):
         c, nc = other.args_cnc()
         if len(nc) == 1:
@@ -52,6 +69,9 @@ class DiscreteOuterProduct(OuterProduct):
                 return Mul(*c) * (self.bra * nc[0].ket) * (self.ket * nc[0].bra)
 
         return super().__mul__(other)
+
+    def _eval_adjoint(self):
+        return DiscreteOuterProduct(Dagger(self.bra), Dagger(self.ket))
 
     def _eval_commutator_DiscreteOuterProduct(self, other, **hints):
         return ((self.bra * other.ket) * (self.ket * other.bra)

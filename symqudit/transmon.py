@@ -1,7 +1,8 @@
 from collections import defaultdict
+import re
 import numpy as np
-from sympy import (Function, I, Integer, Rational, S, Sum, cos, exp, factorial, factorial2, sqrt,
-                   symbols)
+from sympy import (Add, Function, I, Integer, Rational, S, Sum, Symbol, cos, exp, factorial, factorial2,
+                   preorder_traversal, sqrt, symbols)
 from sympy.physics.quantum import Dagger, qapply
 from sympy.physics.quantum.sho1d import LoweringOp, RaisingOp, SHOBra, SHOKet
 
@@ -20,8 +21,8 @@ class Transmon:
         self._harmonic_freq = harmonic_freq
         self._anharm_measure = anharm_measure
 
-        self._omegah = symbols(f'omega_{name}', real=True, positive=True)
-        self._epsilon = symbols(f'epsilon_{name}', real=True, positive=True)
+        self._omegah = Symbol(f'omega_{name}', real=True, positive=True)
+        self._epsilon = Symbol(f'epsilon_{name}', real=True, positive=True)
         self._b = LoweringOp(f'b_{name}')
         self._bdag = RaisingOp(f'b_{name}')
 
@@ -30,7 +31,7 @@ class Transmon:
         self._eigenvalue_terms = defaultdict(dict)
         self._eigenstates = defaultdict(dict)
 
-        self._energygap = _EnergyGap.with_label(name)
+        self._energy_gap = _EnergyGap.with_label(name)
         self._transition_amp = _TransitionAmp.with_label(name)
 
     def evaluate(self, expr):
@@ -89,7 +90,7 @@ class Transmon:
             return S.Zero
 
         k = symbols('k', integer=True, positive=True)
-        return self._omegah * Sum(self._energygap(k), (k, S.One, level))
+        return self._omegah * Sum(self._energy_gap(k), (k, S.One, level))
 
     def hamiltonian_ladder(self, pert_order, normal_order=True):
         return self._omegah * sum(((self._epsilon ** order)
@@ -138,6 +139,7 @@ class Transmon:
                           * SHOKet(im))
 
         self._eigenstates[level][pert_order] = state
+
         return state
 
     def unnormalized_eigenstate(self, level, pert_order):
@@ -244,6 +246,32 @@ class Transmon:
     def _ketbra(self, lket, lbra):
         return ketbra((lket, self.name), (lbra, self.name))
 
+    def symbolify(self, expr):
+        """Convert TransitionAmp and EnergyGap objects in the expression to subscripted symbols."""
+        subs = {}
+        for arg in preorder_traversal(expr):
+            if isinstance(arg, self._energy_gap):
+                subs[arg] = Symbol(fr'{{\gamma^{self._energy_gap.LABEL}}}_{{{arg.args[0]}}}',
+                                   real=True, nonnegative=True)
+            if isinstance(arg, self._transition_amp):
+                subs[arg] = Symbol(fr'{{\nu^{self._transition_amp.LABEL}}}'
+                                   fr'_{{{arg.args[0]},{arg.args[1]}}}', real=True)
+
+        return expr.subs(subs)
+
+    def funcify(self, expr):
+        """Inverse of symbolify."""
+        subs = {}
+        for arg in preorder_traversal(expr):
+            if isinstance(arg, Symbol) and fr'\gamma^{self._energy_gap.LABEL}' in arg.name:
+                matches = re.search('_{([0-9]+)}', arg.name)
+                subs[arg] = self._energy_gap(int(matches.group(1)))
+            if isinstance(arg, Symbol) and fr'\nu^{self._transition_amp.LABEL}' in arg.name:
+                matches = re.search('_{([0-9]+),([0-9]+)}', arg.name)
+                subs[arg] = self._transition_amp(int(matches.group(1)), int(matches.group(2)))
+
+        return expr.subs(subs)
+
 
 class _EnergyGap(Function):
     is_real = True
@@ -261,13 +289,11 @@ class _EnergyGap(Function):
 
         return type(self)(n)
 
-#         if len(n.free_symbols) == 0:
-#             return symbols(fr'{{\gamma^{self.LABEL}}}_{{{n}}}', real=True, nonnegative=True)
-#         else:
-#             return type(self)(n)
-
-    def _latex(self, printer):
-        return fr'{{\gamma^{self.LABEL}}}_{{{self.args[0]}}}'
+    def _latex(self, printer, exp=None):
+        s = fr'{{\gamma^{self.LABEL}}}_{{{self.args[0]}}}'
+        if exp is not None:
+            return s + f'^{{{exp}}}'
+        return s
 
     @staticmethod
     def with_label(label):
@@ -294,15 +320,11 @@ class _TransitionAmp(Function):
 
         return type(self)(m, n)
 
-#         if len(m.free_symbols) + len(n.free_symbols) == 0:
-#             return symbols(fr'{{\nu^{self.LABEL}}}_{{{m}{n}}}', real=True)
-#         else:
-#             return type(self)(m, n)
-
     def _latex(self, printer, exp=None):
+        s = fr'{{\nu^{self.LABEL}}}_{{{self.args[0]},{self.args[1]}}}'
         if exp is not None:
-            return fr'{{\nu^{self.LABEL}}}_{{{self.args[0]},{self.args[1]}}}^{{{exp}}}'
-        return fr'{{\nu^{self.LABEL}}}_{{{self.args[0]},{self.args[1]}}}'
+            return s + f'^{{{exp}}}'
+        return s
 
     @staticmethod
     def with_label(label):
